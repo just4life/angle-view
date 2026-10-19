@@ -20,8 +20,7 @@ const NEW: u8 = 32;
 type PreviewResult = Result<(u32, u32, usize, usize), String>;
 
 enum TaskKind {
-    /// `open` overrides the "open after export" setting.
-    Files { in_place: bool, open: Option<bool> },
+    Files { in_place: bool },
     Clipboard,
 }
 
@@ -701,10 +700,6 @@ impl App {
 
     fn start_export(&mut self, dest: Dest, jobs: Vec<Job>) {
         let label = if self.s.export.remove_bg { "Удаление фона" } else { "Экспорт" };
-        self.start_task(self.s.export.clone(), dest, jobs, label, None);
-    }
-
-    fn start_task(&mut self, settings: ExportSettings, dest: Dest, jobs: Vec<Job>, label: &'static str, open: Option<bool>) {
         if jobs.is_empty() {
             return;
         }
@@ -713,49 +708,10 @@ impl App {
         let done = Arc::new(AtomicUsize::new(0));
         let cancel = Arc::new(AtomicBool::new(false));
         let total = jobs.len();
-        let (ctx, d, c) = (self.ctx.clone(), done.clone(), cancel.clone());
+        let (settings, ctx, d, c) = (self.s.export.clone(), self.ctx.clone(), done.clone(), cancel.clone());
         std::thread::spawn(move || run_batch(jobs, settings, dest, d, c, tx, ctx));
         let started = self.ctx.input(|i| i.time);
-        self.export.task = Some(Task { kind: TaskKind::Files { in_place, open }, label, started, done, cancel, total, rx });
-    }
-
-    /// "Удалить фон" from the menu: PNG with a transparent background next to each source,
-    /// named "<name>-nobg.png". A single result is opened.
-    pub fn remove_bg_quick(&mut self) {
-        if self.export.task.is_some() {
-            self.toast("Подождите, предыдущая обработка ещё идёт");
-            return;
-        }
-        if !crate::cutout::available() {
-            self.ask_model = true;
-            return;
-        }
-        let multi = self.multi_selected();
-        let jobs: Vec<Job> = if multi {
-            self.items
-                .iter()
-                .filter(|it| it.kind == Kind::Image && self.selected.contains(&it.path))
-                .map(|it| Job { path: it.path.clone(), rot: 0, flip: false, crop: None })
-                .collect()
-        } else {
-            self.current()
-                .filter(|c| c.kind == Kind::Image)
-                .map(|c| Job { path: c.path.clone(), rot: self.view.rot, flip: self.view.flip, crop: None })
-                .into_iter()
-                .collect()
-        };
-        if jobs.is_empty() {
-            self.toast("Здесь нечего обрабатывать");
-            return;
-        }
-        let settings = ExportSettings {
-            format: OutFormat::Png,
-            remove_bg: true,
-            name_template: "{name}-nobg".into(),
-            keep_meta: self.s.export.keep_meta,
-            ..Default::default()
-        };
-        self.start_task(settings, Dest::NextToSource, jobs, "Удаление фона", Some(!multi));
+        self.export.task = Some(Task { kind: TaskKind::Files { in_place }, label, started, done, cancel, total, rx });
     }
 
     /// Progress card shown while a task runs and the export panel is closed.
@@ -832,7 +788,7 @@ impl App {
                 }
                 return;
             }
-            TaskKind::Files { in_place, open } => {
+            TaskKind::Files { in_place } => {
                 let stopped = if task.cancel.load(Ordering::Relaxed) { ", остановлено" } else { "" };
                 let msg = match (written.as_slice(), errors.len()) {
                     ([one], 0) if task.label == "Удаление фона" => {
@@ -849,7 +805,7 @@ impl App {
                     }
                     self.act(Action::Reload);
                 }
-                if open.unwrap_or(self.s.export.open_after) {
+                if self.s.export.open_after {
                     if written.len() == 1 {
                         self.open_path(&written[0]);
                     } else if let Some(p) = written.first() {

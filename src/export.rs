@@ -546,8 +546,6 @@ pub enum Dest {
     Folder(PathBuf),
     /// A file name picked in a save dialog.
     File(PathBuf),
-    /// Next to each source file, named by the template.
-    NextToSource,
 }
 
 pub fn file_name(template: &str, src: &Path, e: &Encoded) -> String {
@@ -584,7 +582,6 @@ pub fn export(job: &Job, s: &ExportSettings, dest: &Dest) -> Result<Vec<PathBuf>
                 continue;
             }
             Dest::Folder(dir) => unique_path(&dir.join(file_name(&s.name_template, &job.path, e))),
-            Dest::NextToSource => unique_path(&job.path.with_file_name(file_name(&s.name_template, &job.path, e))),
             Dest::File(f) => {
                 if e.suffix.is_empty() {
                     f.with_extension(e.ext)

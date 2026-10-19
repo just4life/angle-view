@@ -170,8 +170,7 @@ impl App {
         mb.row(Some(Icon::Prompt), &[("Копировать промпт", Action::CopyPrompt, false)], Some("для сгенерированных"));
         mb.sep();
         mb.row(Some(Icon::Export), &[("Экспорт…", Action::Export, self.panel == Panel::Export)], Some("обрезка, размер, формат, Ctrl+S"));
-        let nobg = if self.multi_selected() { "Удалить фон у выделенных" } else { "Удалить фон" };
-        mb.row(Some(Icon::Wand), &[(nobg, Action::RemoveBg, false), ("В экспорте…", Action::RemoveBgExport, false)], Some("B"));
+        mb.row(Some(Icon::Wand), &[("Удалить фон…", Action::RemoveBgExport, false)], Some("в экспорте, B"));
         if full {
             mb.sep();
             let m = self.view.mode;

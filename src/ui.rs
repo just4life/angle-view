@@ -222,7 +222,7 @@ impl App {
             Key::M => Action::AllMeta,
             Key::T => Action::ToggleToolbar,
             Key::P => Action::Flag,
-            Key::B => Action::RemoveBg,
+            Key::B => Action::RemoveBgExport,
             Key::Delete => Action::Delete,
             Key::C if ctrl && m.shift => Action::CopyPath,
             Key::C if ctrl => Action::CopyImage,

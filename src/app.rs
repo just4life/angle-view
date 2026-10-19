@@ -135,7 +135,6 @@ pub enum Action {
     ClearSelection,
     CopyPrompt,
     Export,
-    RemoveBg,
     RemoveBgExport,
     PickBgModel,
     Settings,
@@ -882,7 +881,6 @@ impl App {
                 }
                 self.toggle_panel(Panel::Export);
             }
-            Action::RemoveBg => self.remove_bg_quick(),
             Action::RemoveBgExport => {
                 self.s.export.remove_bg = true;
                 if self.panel != Panel::Export {
