@@ -721,7 +721,7 @@ impl App {
                 None
             }
         };
-        let edge_click = resp.interact_pointer_pos().and_then(edge_dir);
+        let edge_click = resp.interact_pointer_pos().and_then(edge_dir).filter(|_| self.count() > 1);
         if let (true, Some(d)) = (resp.clicked() && !self.crop_selecting() && !self.click_closes_menu, edge_click) {
             // Every click counts, so fast clicking flips through files instead of going fullscreen.
             self.step(d);
