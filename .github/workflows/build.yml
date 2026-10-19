@@ -1,0 +1,25 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --workspace
+      - name: Test
+        run: cargo test --release --workspace
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AngleView-windows
+          path: |
+            target/release/AngleView.exe
+            target/release/bgremove.exe
+            target/release/BgRemoveDemo.exe

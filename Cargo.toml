@@ -1,0 +1,51 @@
+[workspace]
+members = [".", "bg-removal", "bg-removal/demo"]
+resolver = "3"
+
+[package]
+name = "angle_view"
+version = "0.2.0"
+edition = "2024"
+description = "Fast, minimalist image viewer for Windows in pure Rust"
+license = "MIT"
+repository = "https://github.com/just4life/angle-view"
+
+[[bin]]
+name = "AngleView"
+path = "src/main.rs"
+
+[dependencies]
+arboard = { version = "3.7.0", default-features = false, features = ["image-data"] }
+bg_removal = { path = "bg-removal" }
+chrono = "0.4.45"
+color_quant = "1.1"
+crossbeam-channel = "0.5.17"
+dirs = "7.0.0"
+eframe = { version = "0.37.0", default-features = false, features = ["glow", "wgpu", "default_fonts", "clipboard", "wayland", "x11"] }
+fastrand = "2.5.0"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff", "ico", "tga", "qoi", "rayon"] }
+jpeg-decoder = "0.3.2"
+jxl-oxide = { version = "0.12.6", features = ["image"] }
+kamadak-exif = "0.6.1"
+miniz_oxide = "0.9.1"
+notify = "8.2.0"
+resvg = "0.48.1"
+rfd = "0.17.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+trash = "5.2.9"
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_System_Power", "Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = true
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[build-dependencies]
+winresource = "0.1.34"

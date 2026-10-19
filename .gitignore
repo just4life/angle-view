@@ -1,0 +1,4 @@
+/target
+/models/*.safetensors
+/installer/*.exe
+*.onnx
