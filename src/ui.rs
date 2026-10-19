@@ -710,7 +710,22 @@ impl App {
         if ctx.input(|i| i.pointer.any_pressed()) {
             self.click_closes_menu = self.menu != Menu::None;
         }
-        if resp.double_clicked() {
+        // Narrow strips along the left and right edges switch to the previous and next file.
+        let edge = (rect.width() * 0.1).min(80.0);
+        let edge_dir = |p: Pos2| {
+            if p.x < rect.left() + edge {
+                Some(-1)
+            } else if p.x > rect.right() - edge {
+                Some(1)
+            } else {
+                None
+            }
+        };
+        let edge_click = resp.interact_pointer_pos().and_then(edge_dir);
+        if let (true, Some(d)) = (resp.clicked() && !self.crop_selecting() && !self.click_closes_menu, edge_click) {
+            // Every click counts, so fast clicking flips through files instead of going fullscreen.
+            self.step(d);
+        } else if resp.double_clicked() {
             // The first click of the pair already toggled the panel; undo that.
             self.s.toolbar_visible = !self.s.toolbar_visible;
             self.act(Action::ToggleFullscreen);
@@ -822,6 +837,26 @@ impl App {
                 }
             }
         }
+        if let Some(d) = resp.hover_pos().and_then(edge_dir) {
+            self.edge_hint(ui, &resp, rect, edge, d);
+        }
+    }
+
+    /// Hint for the edge strips: a faint shade and a chevron under the pointer.
+    fn edge_hint(&self, ui: &Ui, resp: &egui::Response, rect: Rect, edge: f32, dir: i32) {
+        if self.count() < 2 || self.crop_selecting() || self.menu != Menu::None || resp.dragged() {
+            return;
+        }
+        let zone = if dir < 0 {
+            Rect::from_min_max(rect.left_top(), pos2(rect.left() + edge, rect.bottom()))
+        } else {
+            Rect::from_min_max(pos2(rect.right() - edge, rect.top()), rect.right_bottom())
+        };
+        let p = ui.painter_at(rect);
+        p.rect_filled(zone, 0.0, Color32::from_white_alpha(10));
+        let icon = Rect::from_center_size(zone.center(), vec2(28.0, 28.0));
+        icons::paint(&p, icon, if dir < 0 { Icon::ChevronLeft } else { Icon::ChevronRight }, TEXT);
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
     }
 
     /// Resolves the zoom mode into a scale and keeps the pan inside sensible bounds.
