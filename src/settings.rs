@@ -70,6 +70,8 @@ pub struct Settings {
     pub remember_zoom: bool,
     pub wheel: WheelAction,
     pub include_subfolders: bool,
+    /// Subfolders of the open folder are shown as tiles at the top of the grid.
+    pub show_folder_tiles: bool,
     pub sort: SortKey,
     pub sort_desc: bool,
     pub thumb_size: f32,
@@ -89,6 +91,8 @@ pub struct Settings {
     pub restore_session: bool,
     pub autoplay_animations: bool,
     pub quick_access: Vec<PathBuf>,
+    /// Subfolders left out when a folder is opened together with its subfolders.
+    pub excluded_dirs: Vec<PathBuf>,
     pub recent: Vec<PathBuf>,
     /// Files added to favourites ("Избранное"), across all folders, newest first.
     pub flagged: Vec<PathBuf>,
@@ -114,6 +118,7 @@ impl Default for Settings {
             remember_zoom: false,
             wheel: WheelAction::Zoom,
             include_subfolders: false,
+            show_folder_tiles: true,
             sort: SortKey::Name,
             sort_desc: false,
             grid_wheel_rows: 1.0,
@@ -131,6 +136,7 @@ impl Default for Settings {
             restore_session: true,
             autoplay_animations: true,
             quick_access: Vec::new(),
+            excluded_dirs: Vec::new(),
             recent: Vec::new(),
             flagged: Vec::new(),
             bg_model: None,

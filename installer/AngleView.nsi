@@ -74,6 +74,7 @@ VIAddVersionKey /LANG=${LANG_RUSSIAN} "ProductVersion" "${VERSION}"
   !insertmacro ${MACRO} jpeg
   !insertmacro ${MACRO} jpe
   !insertmacro ${MACRO} jfif
+  !insertmacro ${MACRO} jif
   !insertmacro ${MACRO} png
   !insertmacro ${MACRO} apng
   !insertmacro ${MACRO} gif

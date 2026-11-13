@@ -35,11 +35,16 @@ impl eframe::App for App {
         ui.painter().rect_filled(full, 0.0, Color32::from_rgb(r, g, b));
 
         let docked = self.s.toolbar_visible && !self.fullscreen;
-        let near_top = pointer.is_some_and(|p| p.y < full.top() + TOOLBAR_H + 4.0)
+        // In the windowed grid a tab hangs under the panel; it counts as part of the panel's hover zone
+        // so moving onto it doesn't hide the panel.
+        let tab_mode = self.grid && !self.fullscreen;
+        let on_tab = tab_mode && pointer.is_some_and(|p| tab_rect(full, true).expand(6.0).contains(p));
+        let near_top = (pointer.is_some_and(|p| p.y < full.top() + TOOLBAR_H + 4.0) || on_tab)
             && (now - self.last_pointer_move < 3.0 || docked);
         let toolbar_shown = docked || near_top || self.menu != Menu::None;
+        self.over_toolbar = toolbar_shown && pointer.is_some_and(|p| p.y < full.top() + TOOLBAR_H);
 
-        if self.count() == 0 {
+        if self.count() == 0 && !(self.grid && self.folder_bar()) {
             self.empty_ui(ui, full);
         } else if self.grid {
             let top = if docked { TOOLBAR_H } else { 0.0 };
@@ -47,7 +52,12 @@ impl eframe::App for App {
             self.grid_ui(ui, rect);
         } else {
             let strip = if self.frame_mode { Strip::Off } else { self.s.strip };
-            let size = self.s.strip_size.clamp(60.0, 300.0);
+            // The side strip can be dragged wide (several columns); the bottom one up to half the window.
+            let max = match strip {
+                Strip::Side => (full.width() * 0.75).max(60.0),
+                _ => (full.height() * 0.5).max(60.0),
+            };
+            let size = self.s.strip_size.clamp(60.0, max);
             let top = full.top() + if docked { TOOLBAR_H } else { 0.0 };
             let (view, strip_rect) = match strip {
                 Strip::Off => (full, None),
@@ -64,12 +74,16 @@ impl eframe::App for App {
             self.overlays_ui(ui, view, now, pointer);
             if let Some(r) = strip_rect {
                 self.strip_ui(ui, r, strip == Strip::Bottom);
+                self.strip_resize_ui(ui, r, strip == Strip::Bottom, max);
             }
         }
 
         if toolbar_shown {
             let rect = Rect::from_min_size(full.min, vec2(full.width(), TOOLBAR_H));
             self.toolbar_ui(ui, rect);
+        }
+        if tab_mode && self.count() + usize::from(self.folder_bar()) > 0 {
+            self.toolbar_tab_ui(ui, full, toolbar_shown);
         }
         self.panels_ui(&ctx, full);
         self.menus_ui(&ctx);
@@ -165,6 +179,8 @@ impl App {
                 Key::PageDown => return { nav(self, cols * 4); None },
                 Key::Home => return { nav(self, -(self.count() as i32)); None },
                 Key::End => return { nav(self, self.count() as i32); None },
+                Key::Backspace => return self.bar_current().is_some().then_some(Action::FolderAll),
+                Key::Enter if self.count() == 0 => return None,
                 Key::Enter => {
                     return Some(if self.current().is_some_and(|c| c.kind == Kind::Video) {
                         Action::OpenExternal
@@ -278,7 +294,8 @@ impl App {
         if cr.hovered() {
             ui.painter().rect_filled(chev, 2.0, HOVER);
         }
-        icons::paint(ui.painter(), chev.shrink(2.0), Icon::ChevronUp, TEXT_DIM);
+        let pinned = self.s.toolbar_visible && !self.fullscreen;
+        icons::paint(ui.painter(), chev.shrink(2.0), if pinned { Icon::ChevronUp } else { Icon::ChevronDown }, TEXT_DIM);
         if cr.on_hover_text(if self.s.toolbar_visible { "Скрыть панель (T)" } else { "Закрепить панель (T)" }).clicked() {
             actions.push(Action::ToggleToolbar);
         }
@@ -344,8 +361,11 @@ impl App {
             actions.push(Action::OpenMenu(Menu::Zoom(pos2(r.rect.left(), rect.bottom() + 2.0))));
         }
 
-        // File name and position, clipped to the free space between the groups.
-        if let Some(it) = self.current() {
+        // In the grid the free space holds the subfolder buttons.
+        if self.grid && self.folder_bar() {
+            let area = Rect::from_min_max(pos2(x + 8.0, rect.top()), pos2(rx - 8.0, rect.bottom()));
+            self.toolbar_folders_ui(ui, area, &mut actions);
+        } else if let Some(it) = self.current() {
             let flagged = it.flagged;
             let counter = format!("{} из {}", self.index + 1, self.count());
             let p = ui.painter().with_clip_rect(Rect::from_min_max(pos2(x + 6.0, rect.top()), pos2(rx - 6.0, rect.bottom())));
@@ -400,10 +420,17 @@ impl App {
 
     fn grid_ui(&mut self, ui: &mut Ui, rect: Rect) {
         let ctx = ui.ctx().clone();
+        // Mouse back / forward walk through the folders opened from the bar.
+        if ctx.input(|i| i.pointer.button_clicked(PointerButton::Extra1)) {
+            self.bar_history(-1);
+        }
+        if ctx.input(|i| i.pointer.button_clicked(PointerButton::Extra2)) {
+            self.bar_history(1);
+        }
         let cell = self.s.thumb_size.round();
         // Ctrl + wheel changes the thumbnail size.
         let (wheel, ctrl) = wheel_input(&ctx);
-        let hovering = ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| rect.contains(p));
+        let hovering = ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| rect.contains(p)) && !self.over_toolbar;
         if ctrl && wheel != 0.0 && hovering && self.menu == Menu::None {
             self.s.thumb_size = (self.s.thumb_size * 1.12f32.powf(wheel)).clamp(64.0, 480.0);
         }
@@ -449,6 +476,10 @@ impl App {
             } else if top + row_h > off + view_h {
                 area = area.vertical_scroll_offset(top + row_h - view_h);
             }
+        }
+        if let Some(y) = self.grid_jump.take() {
+            self.grid_target = None;
+            area = area.vertical_scroll_offset(y.clamp(0.0, max_off));
         }
         let mut clicked: Option<(usize, u8)> = None;
         let out = area.show_rows(&mut child, row_h, rows, |ui, range| {
@@ -516,6 +547,142 @@ impl App {
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// In the grid with the panel hidden: a small tab at the top edge that brings the panel back.
+    fn toolbar_tab_ui(&mut self, ui: &mut Ui, full: Rect, shown: bool) {
+        let tab = tab_rect(full, shown);
+        let resp = ui.interact(tab.expand(4.0), Id::NULL.with("toolbar_tab"), Sense::click());
+        let fill = if resp.hovered() { ACCENT_DARK } else { Color32::from_rgba_unmultiplied(40, 40, 46, 220) };
+        let p = ui.painter();
+        p.rect_filled(tab, egui::CornerRadius { nw: 0, ne: 0, sw: 7, se: 7 }, fill);
+        let pinned = self.s.toolbar_visible;
+        let icon = if pinned { Icon::ChevronUp } else { Icon::ChevronDown };
+        icons::paint(p, Rect::from_center_size(tab.center(), vec2(14.0, 14.0)), icon, if resp.hovered() { Color32::WHITE } else { TEXT_DIM });
+        let tip = if pinned { "Скрыть панель (T)" } else { "Закрепить панель (T)" };
+        if resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(tip).clicked() {
+            if self.menu != Menu::None {
+                self.menu = Menu::None;
+            }
+            self.act(Action::ToggleToolbar);
+        }
+    }
+
+    /// Subfolder buttons on the toolbar in the grid; scrolls sideways when they don't fit.
+    fn toolbar_folders_ui(&mut self, ui: &mut Ui, area: Rect, actions: &mut Vec<Action>) {
+        const CHIP_H: f32 = 28.0;
+        const GAP: f32 = 5.0;
+        if area.width() < 60.0 {
+            return;
+        }
+        let name_font = FontId::proportional(12.5);
+        let count_font = FontId::proportional(11.0);
+        let current = self.bar_current().map(|p| p.to_path_buf());
+        let root = self.bar_root.clone().unwrap_or_default();
+        // (label, count, target, active, tooltip)
+        let mut chips: Vec<(String, usize, Option<std::path::PathBuf>, bool, String)> = Vec::with_capacity(self.subdirs.len() + 1);
+        chips.push(("Все".into(), self.bar_all, None, current.is_none(), format!("{}
+Backspace", root.display())));
+        for d in &self.subdirs {
+            let tip = format!("{}
+{} {}", d.path.display(), d.files, plural(d.files, "файл", "файла", "файлов"));
+            chips.push((d.name.clone(), d.files, Some(d.path.clone()), current.as_ref() == Some(&d.path), tip));
+        }
+        let mut placed = Vec::with_capacity(chips.len());
+        let mut x = 0.0f32;
+        let mut active_span = None;
+        for (label, count, _, active, _) in &chips {
+            let mut job = egui::text::LayoutJob::simple_singleline(label.clone(), name_font.clone(), TEXT);
+            job.wrap = egui::text::TextWrapping { max_width: 200.0, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+            let name = ui.painter().layout_job(job);
+            let cnt = ui.painter().layout_no_wrap(count.to_string(), count_font.clone(), TEXT_DIM);
+            let w = 8.0 + 14.0 + 6.0 + name.size().x + 6.0 + cnt.size().x + 10.0;
+            if *active {
+                active_span = Some((x, x + w));
+            }
+            placed.push((x, w, name, cnt));
+            x += w + GAP;
+        }
+        let total = x - GAP;
+        let max_off = (total - area.width()).max(0.0);
+
+        // Wheel over the buttons scrolls them; the chosen folder is brought into view once.
+        let (wheel, _) = wheel_input(ui.ctx());
+        let hovering = ui.ctx().input(|i| i.pointer.hover_pos()).is_some_and(|p| area.contains(p));
+        if hovering && wheel != 0.0 {
+            self.bar_scroll -= wheel * 90.0;
+        }
+        if self.bar_reveal {
+            self.bar_reveal = false;
+            if let Some((a, b)) = active_span {
+                if a < self.bar_scroll {
+                    self.bar_scroll = a - 30.0;
+                } else if b > self.bar_scroll + area.width() {
+                    self.bar_scroll = b - area.width() + 30.0;
+                }
+            }
+        }
+        self.bar_scroll = self.bar_scroll.clamp(0.0, max_off);
+        let off = self.bar_scroll;
+
+        let p = ui.painter().with_clip_rect(area);
+        let y = area.center().y - CHIP_H / 2.0;
+        for (i, ((_, _, target, active, tip), (cx, w, name, cnt))) in chips.into_iter().zip(placed).enumerate() {
+            let r = Rect::from_min_size(pos2(area.left() + cx - off, y), vec2(w, CHIP_H));
+            if r.right() < area.left() || r.left() > area.right() {
+                continue;
+            }
+            let resp = ui.interact(r.intersect(area), Id::NULL.with(("folder_chip", i)), Sense::click());
+            let hovered = resp.hovered();
+            let (fill, fg, dim) = if active {
+                (ACCENT_DARK, Color32::WHITE, Color32::from_rgb(225, 210, 250))
+            } else if hovered {
+                (Color32::from_rgb(58, 58, 66), Color32::WHITE, TEXT_DIM)
+            } else {
+                (Color32::from_rgb(38, 38, 44), TEXT, TEXT_DIM)
+            };
+            p.rect_filled(r, 6.0, fill);
+            if active {
+                p.rect_stroke(r, 6.0, Stroke::new(1.0, ACCENT), StrokeKind::Inside);
+            }
+            let icon = if target.is_none() { Icon::Grid } else { Icon::Folder };
+            let ir = Rect::from_min_size(pos2(r.left() + 8.0, r.center().y - 7.0), vec2(14.0, 14.0));
+            icons::paint(&p, ir, icon, if active { Color32::WHITE } else { dim });
+            let nx = ir.right() + 6.0;
+            p.galley_with_override_text_color(pos2(nx, r.center().y - name.size().y / 2.0), name.clone(), fg);
+            let cxx = nx + name.size().x + 6.0;
+            p.galley_with_override_text_color(pos2(cxx, r.center().y - cnt.size().y / 2.0 + 0.5), cnt, dim);
+            let resp = resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text_at_pointer(tip);
+            if resp.clicked() && !active {
+                actions.push(match target {
+                    Some(d) => Action::EnterFolder(d),
+                    None => Action::FolderAll,
+                });
+            }
+        }
+
+        // Arrows at the clipped ends: click to scroll a page.
+        let mut arrow = |left: bool| {
+            let r = if left {
+                Rect::from_min_size(pos2(area.left(), y), vec2(24.0, CHIP_H))
+            } else {
+                Rect::from_min_size(pos2(area.right() - 24.0, y), vec2(24.0, CHIP_H))
+            };
+            let resp = ui.interact(r, Id::NULL.with(("chip_arrow", left)), Sense::click());
+            let fill = if resp.hovered() { HOVER } else { Color32::from_rgb(28, 28, 30) };
+            ui.painter().rect_filled(r, 6.0, fill);
+            icons::paint(ui.painter(), r.shrink(5.0), if left { Icon::ChevronLeft } else { Icon::ChevronRight }, TEXT);
+            if resp.clicked() {
+                let step = area.width() * 0.7;
+                self.bar_scroll = (self.bar_scroll + if left { -step } else { step }).clamp(0.0, max_off);
+            }
+        };
+        if off > 0.5 {
+            arrow(true);
+        }
+        if off < max_off - 0.5 {
+            arrow(false);
         }
     }
 
@@ -588,19 +755,54 @@ impl App {
     // ---------- thumbnail strip ----------
 
     /// A row (bottom) or column (side) of thumbnails that follows the current image.
+    /// Drag handle on the inner edge of the strip; double click restores the default size.
+    fn strip_resize_ui(&mut self, ui: &mut Ui, rect: Rect, horizontal: bool, max: f32) {
+        let handle = if horizontal {
+            Rect::from_min_max(pos2(rect.left(), rect.top() - 3.0), pos2(rect.right(), rect.top() + 3.0))
+        } else {
+            Rect::from_min_max(pos2(rect.right() - 3.0, rect.top()), pos2(rect.right() + 3.0, rect.bottom()))
+        };
+        let resp = ui.interact(handle, Id::NULL.with("strip_resize"), Sense::click_and_drag());
+        let active = resp.hovered() || resp.dragged();
+        if active {
+            ui.ctx().set_cursor_icon(if horizontal { CursorIcon::ResizeVertical } else { CursorIcon::ResizeHorizontal });
+            let line = if horizontal {
+                Rect::from_min_max(pos2(rect.left(), rect.top() - 1.0), pos2(rect.right(), rect.top() + 1.0))
+            } else {
+                Rect::from_min_max(pos2(rect.right() - 1.0, rect.top()), pos2(rect.right() + 1.0, rect.bottom()))
+            };
+            ui.painter().rect_filled(line, 0.0, ACCENT);
+        }
+        if resp.dragged() {
+            if let Some(p) = resp.interact_pointer_pos() {
+                let size = if horizontal { rect.bottom() - p.y } else { p.x - rect.left() };
+                self.s.strip_size = size.clamp(60.0, max).round();
+                self.strip_index = usize::MAX;
+            }
+        }
+        if resp.double_clicked() {
+            self.s.strip_size = 110.0;
+            self.strip_index = usize::MAX;
+        }
+    }
+
     fn strip_ui(&mut self, ui: &mut Ui, rect: Rect, horizontal: bool) {
         let ctx = ui.ctx().clone();
         ui.painter().rect_filled(rect, 0.0, Color32::from_rgb(12, 12, 12));
-        let cell = if horizontal { rect.height() } else { rect.width() };
+        // A wide side strip holds several columns of thumbnails, each about thumbnail size.
+        let lanes = if horizontal { 1 } else { ((rect.width() / self.s.thumb_size.clamp(90.0, 240.0)).floor() as usize).max(1) };
+        let cell = if horizontal { rect.height() } else { rect.width() / lanes as f32 };
         let len = if horizontal { rect.width() } else { rect.height() };
         let n = self.count();
-        let max_off = (n as f32 * cell - len).max(0.0);
+        let lines = n.div_ceil(lanes);
+        let max_off = (lines as f32 * cell - len).max(0.0);
         // Keep the current image in view when it changes.
         if self.strip_index != self.index {
-            let center = (self.index as f32 + 0.5) * cell - len / 2.0;
+            let line = (self.index / lanes) as f32;
+            let center = (line + 0.5) * cell - len / 2.0;
             let first = self.strip_index == usize::MAX;
             self.strip_index = self.index;
-            let lo = self.index as f32 * cell;
+            let lo = line * cell;
             if first {
                 self.strip_offset = center.clamp(0.0, max_off);
             } else if lo < self.strip_offset + cell * 0.5 || lo + cell > self.strip_offset + len - cell * 0.5 {
@@ -624,16 +826,17 @@ impl App {
             }
         }
         self.strip_offset = self.strip_offset.clamp(0.0, max_off);
-        let first = (self.strip_offset / cell).floor() as usize;
-        let last = (((self.strip_offset + len) / cell).ceil() as usize).min(n);
+        let first = (self.strip_offset / cell).floor() as usize * lanes;
+        let last = ((((self.strip_offset + len) / cell).ceil() as usize) * lanes).min(n);
         let p = ui.painter_at(rect);
         let mut go = None;
         for vi in first..last {
-            let along = vi as f32 * cell - self.strip_offset;
+            let along = (vi / lanes) as f32 * cell - self.strip_offset;
+            let across = (vi % lanes) as f32 * cell;
             let r = if horizontal {
                 Rect::from_min_size(pos2(rect.left() + along, rect.top()), vec2(cell, cell))
             } else {
-                Rect::from_min_size(pos2(rect.left(), rect.top() + along), vec2(cell, cell))
+                Rect::from_min_size(pos2(rect.left() + across, rect.top() + along), vec2(cell, cell))
             };
             let Some((path, name)) = self.item(vi).map(|it| (it.path.clone(), it.name.clone())) else { continue };
             let resp = ui.interact(r.intersect(rect), Id::NULL.with(("strip", vi)), Sense::click());
@@ -1015,6 +1218,21 @@ pub fn wheel_input(ctx: &Context) -> (f32, bool) {
         }
         (dy, ctrl || i.modifiers.ctrl)
     })
+}
+
+/// The panel's tab in the grid: under the panel when it is shown, at the top edge otherwise.
+fn tab_rect(full: Rect, shown: bool) -> Rect {
+    let top = if shown { TOOLBAR_H } else { 0.0 };
+    Rect::from_center_size(pos2(full.center().x, full.top() + top + 8.0), vec2(72.0, 16.0))
+}
+
+/// Russian plural form: 1 файл, 2 файла, 5 файлов.
+fn plural<'a>(n: usize, one: &'a str, few: &'a str, many: &'a str) -> &'a str {
+    match (n % 10, n % 100) {
+        (1, r) if r != 11 => one,
+        (2..=4, r) if !(12..=14).contains(&r) => few,
+        _ => many,
+    }
 }
 
 /// Paints a texture into `rect`, rotated by quarter turns and optionally mirrored.

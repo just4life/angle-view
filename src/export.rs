@@ -61,7 +61,7 @@ impl OutFormat {
             return self;
         }
         match formats::ext_of(src).as_str() {
-            "jpg" | "jpeg" | "jpe" | "jfif" => Self::Jpeg,
+            "jpg" | "jpeg" | "jpe" | "jfif" | "jif" => Self::Jpeg,
             "webp" => Self::Webp,
             "gif" => Self::Gif,
             "bmp" | "dib" => Self::Bmp,
@@ -290,7 +290,12 @@ pub struct Encoded {
 
 /// Decodes, transforms and encodes `job` once per requested size.
 pub fn render(job: &Job, s: &ExportSettings) -> Result<Vec<Encoded>, String> {
-    let mut img = decode::load_dynamic(&job.path)?;
+    // A cut-out already made for the preview is reused: rotation and crop apply to it as well.
+    let cached = if s.remove_bg { crate::cutout::cached(&job.path) } else { None };
+    let mut img = match &cached {
+        Some(c) => DynamicImage::ImageRgba8((**c).clone()),
+        None => decode::load_dynamic(&job.path)?,
+    };
     img = match job.rot % 4 {
         1 => img.rotate90(),
         2 => img.rotate180(),
@@ -316,7 +321,7 @@ pub fn render(job: &Job, s: &ExportSettings) -> Result<Vec<Encoded>, String> {
             img = img.crop_imm(x, y, cw.min(w - x.min(w - 1)), ch.min(h - y.min(h - 1)));
         }
     }
-    if s.remove_bg {
+    if s.remove_bg && cached.is_none() {
         img = crate::cutout::remove(&img)?;
     }
 

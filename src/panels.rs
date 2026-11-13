@@ -166,6 +166,25 @@ impl App {
             mb.row(Some(Icon::Check), &[("Выделить все", Action::SelectAll, false)], Some("Ctrl+A, Ctrl / Shift + щелчок"));
             mb.sep();
         }
+        let ex = self.exclude_candidates();
+        let back = self.excluded_here();
+        if !ex.is_empty() || back > 0 {
+            let label = match ex.as_slice() {
+                [] => String::new(),
+                [one] => format!("Исключить папку «{}»", short(&one.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), 18)),
+                many => format!("Исключить папки ({})", many.len()),
+            };
+            let back_label = if ex.is_empty() { format!("Вернуть исключённые папки ({back})") } else { format!("Вернуть ({back})") };
+            let mut items: Vec<(&str, Action, bool)> = Vec::new();
+            if !ex.is_empty() {
+                items.push((&label, Action::ExcludeFolder, false));
+            }
+            if back > 0 {
+                items.push((&back_label, Action::RestoreExcluded, false));
+            }
+            mb.row(Some(Icon::Folder), &items, None);
+            mb.sep();
+        }
         mb.row(Some(Icon::Info), &[("Информация", Action::Info, self.panel == Panel::Info), ("Все метаданные", Action::AllMeta, self.panel == Panel::Meta)], None);
         mb.row(Some(Icon::Prompt), &[("Копировать промпт", Action::CopyPrompt, false)], Some("для сгенерированных"));
         mb.sep();
@@ -261,6 +280,7 @@ impl App {
     fn folders_menu(&self, mb: &mut MenuBuilder) {
         mb.row(Some(Icon::Folder), &[("Открыть папку…", Action::OpenFolder, false), ("Открыть файлы…", Action::OpenFiles, false)], None);
         mb.row(None, &[("Включая подпапки", Action::IncludeSubfolders, self.s.include_subfolders)], None);
+        mb.row(None, &[("Папки на панели", Action::ToggleFolderTiles, self.s.show_folder_tiles)], Some("Backspace: вся папка"));
         mb.sep();
         mb.label("Быстрый доступ");
         if self.s.quick_access.is_empty() {
@@ -455,6 +475,7 @@ impl App {
 
         section(ui, "Папки и файлы");
         ui.checkbox(&mut s.include_subfolders, "Включать подпапки");
+        ui.checkbox(&mut s.show_folder_tiles, "Кнопки подпапок на панели в режиме сетки");
         ui.label("Сортировка");
         segmented(
             ui,
@@ -654,6 +675,10 @@ const KEYS: &[(&str, &str)] = &[
 
 fn section(ui: &mut Ui, title: &str) {
     heading(ui, title);
+}
+
+fn short(s: &str, n: usize) -> String {
+    if s.chars().count() > n { format!("{}…", s.chars().take(n - 1).collect::<String>()) } else { s.to_string() }
 }
 
 fn short_name(p: &std::path::Path) -> String {

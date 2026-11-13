@@ -50,6 +50,9 @@ pub struct ExportUi {
     task: Option<Task>,
     profile_name: String,
     confirm_until: f64,
+    /// Background removal preview: the running job (file, start time) and the last result.
+    cut_running: Option<(PathBuf, f64, Receiver<Result<egui::ColorImage, String>>)>,
+    cut: Option<(PathBuf, Result<egui::TextureHandle, String>)>,
 }
 
 impl Default for ExportUi {
@@ -66,6 +69,8 @@ impl Default for ExportUi {
             task: None,
             profile_name: String::new(),
             confirm_until: 0.0,
+            cut_running: None,
+            cut: None,
         }
     }
 }
@@ -138,9 +143,86 @@ impl App {
     // ---------- crop overlay in the viewer ----------
 
     /// Called by the viewer after the image is painted.
+    /// With "Удалить фон" ticked in the export panel, shows the result over the image:
+    /// the neural network runs once per file in the background, and the chosen background
+    /// is painted under the cut-out, so switching it is instant.
+    fn bg_preview(&mut self, ui: &Ui, img_rect: Rect, area: Rect) {
+        if self.panel != crate::app::Panel::Export || !self.s.export.remove_bg || self.transition.is_some() {
+            return;
+        }
+        let Some(path) = self.current().filter(|it| it.kind == Kind::Image).map(|it| it.path.clone()) else { return };
+        if !crate::cutout::available() {
+            return;
+        }
+        let now = ui.input(|i| i.time);
+        if let Some((p, _, rx)) = &self.export.cut_running {
+            if let Ok(r) = rx.try_recv() {
+                let p = p.clone();
+                let r = r.map(|img| ui.ctx().load_texture("bg_preview", img, egui::TextureOptions::LINEAR));
+                self.export.cut = Some((p, r));
+                self.export.cut_running = None;
+            }
+        }
+        let painter = ui.painter_at(area);
+        let badge = |text: &str| {
+            let r = img_rect.intersect(area);
+            let pos = pos2(r.center().x, r.top() + 24.0);
+            let galley = painter.layout_no_wrap(text.to_owned(), FontId::proportional(14.0), TEXT);
+            let bg = Rect::from_center_size(pos, galley.size() + vec2(24.0, 12.0));
+            painter.rect_filled(bg, 8.0, Color32::from_rgba_premultiplied(30, 26, 40, 230));
+            painter.rect_stroke(bg, 8.0, Stroke::new(1.0, ACCENT.gamma_multiply(0.5)), StrokeKind::Inside);
+            painter.galley(bg.center() - galley.size() / 2.0, galley, TEXT);
+        };
+        match self.export.cut.as_ref().filter(|(p, _)| *p == path) {
+            Some((_, Ok(tex))) => {
+                let s = &self.s.export;
+                let jpeg = s.out_format(&path) == OutFormat::Jpeg;
+                let fill = if s.bg_on { Some(s.bg) } else if jpeg { Some([255, 255, 255]) } else { None };
+                match fill {
+                    Some([r, g, b]) => {
+                        painter.rect_filled(img_rect, 0.0, Color32::from_rgb(r, g, b));
+                    }
+                    None => paint_checker(&painter, img_rect, area),
+                }
+                crate::ui::paint_texture(&painter, tex.id(), img_rect, self.view.rot, self.view.flip, Color32::WHITE);
+            }
+            Some((_, Err(e))) => badge(&format!("Не удалось удалить фон: {e}")),
+            None => {
+                let started = match &self.export.cut_running {
+                    Some((p, t, _)) => if *p == path { *t } else { now },
+                    None => {
+                        let (tx, rx) = crossbeam_channel::bounded(1);
+                        let ctx = self.ctx.clone();
+                        let p = path.clone();
+                        std::thread::spawn(move || {
+                            let r = std::panic::catch_unwind(|| crate::cutout::remove_file(&p))
+                                .unwrap_or_else(|_| Err("ошибка при обработке".into()))
+                                .map(|cut| {
+                                    // Keep the texture within what any GPU accepts.
+                                    let img = image::DynamicImage::ImageRgba8((*cut).clone());
+                                    let img = if img.width() > 4096 || img.height() > 4096 { img.resize(4096, 4096, image::imageops::FilterType::Triangle) } else { img };
+                                    let rgba = img.to_rgba8();
+                                    egui::ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw())
+                                });
+                            let _ = tx.send(r);
+                            ctx.request_repaint();
+                        });
+                        self.export.cut_running = Some((path.clone(), now, rx));
+                        now
+                    }
+                };
+                // The image under the badge is dimmed a little while the network works.
+                painter.rect_filled(img_rect, 0.0, Color32::from_black_alpha(70));
+                badge(&format!("Удаление фона для превью… {} с", (now - started).max(0.0) as u32));
+                ui.ctx().request_repaint_after_secs(0.25);
+            }
+        }
+    }
+
     pub fn export_overlay(&mut self, ui: &Ui, resp: &Response, img_rect: Rect, area: Rect, img_px: (u32, u32)) {
         self.export.view_area = area;
         self.export.img_rect = img_rect;
+        self.bg_preview(ui, img_rect, area);
         let Some(mode) = self.export_crop_mode() else { return };
         let to_norm = |p: Pos2| [((p.x - img_rect.left()) / img_rect.width()).clamp(0.0, 1.0), ((p.y - img_rect.top()) / img_rect.height()).clamp(0.0, 1.0)];
         if mode == CropMode::Select {
@@ -853,4 +935,29 @@ fn size_value(v: &mut u32) -> egui::DragValue<'_> {
             let t = t.trim().to_lowercase();
             if t.is_empty() || t.starts_with('а') || t.starts_with('a') { Some(0.0) } else { t.parse().ok() }
         })
+}
+
+/// Light checkerboard that marks transparent pixels, painted only where the image is visible.
+fn paint_checker(p: &egui::Painter, rect: Rect, area: Rect) {
+    const CELL: f32 = 12.0;
+    let vis = rect.intersect(area);
+    if vis.width() <= 0.0 || vis.height() <= 0.0 {
+        return;
+    }
+    p.rect_filled(vis, 0.0, Color32::from_gray(236));
+    let dark = Color32::from_gray(200);
+    let i0 = ((vis.left() - rect.left()) / CELL).floor() as i64;
+    let j0 = ((vis.top() - rect.top()) / CELL).floor() as i64;
+    let i1 = ((vis.right() - rect.left()) / CELL).ceil() as i64;
+    let j1 = ((vis.bottom() - rect.top()) / CELL).ceil() as i64;
+    for j in j0..j1 {
+        for i in i0..i1 {
+            if (i + j) % 2 == 0 {
+                continue;
+            }
+            let min = pos2(rect.left() + i as f32 * CELL, rect.top() + j as f32 * CELL);
+            let r = Rect::from_min_size(min, vec2(CELL, CELL)).intersect(vis);
+            p.rect_filled(r, 0.0, dark);
+        }
+    }
 }

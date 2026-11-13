@@ -39,6 +39,15 @@ impl Item {
     }
 }
 
+/// A subfolder of the opened folder, shown in the folder bar above the grid.
+pub struct SubDir {
+    pub path: PathBuf,
+    pub name: String,
+    /// Images and videos directly inside (not counting deeper levels).
+    pub files: usize,
+    pub modified: SystemTime,
+}
+
 pub struct FullImage {
     pub textures: Vec<TextureHandle>,
     pub delays: Vec<u32>,
@@ -156,6 +165,13 @@ pub enum Action {
     AddQuickFolder,
     OpenPath(PathBuf),
     RemoveQuick(PathBuf),
+    ExcludeFolder,
+    /// Shows only the files of one subfolder from the folder bar.
+    EnterFolder(PathBuf),
+    /// Back to the whole opened folder (the first chip of the bar, Backspace in the grid).
+    FolderAll,
+    ToggleFolderTiles,
+    RestoreExcluded,
     OpenFolder,
     OpenFiles,
     ToggleToolbar,
@@ -180,6 +196,22 @@ pub struct App {
     pub index: usize,
     pub folder: Option<PathBuf>,
     pub recursive: bool,
+    /// The folder the user opened; its direct subfolders make up the folder bar.
+    pub bar_root: Option<PathBuf>,
+    /// Whether the opened folder was shown with its subfolders (restored by "Все").
+    pub bar_recursive: bool,
+    /// Files in the opened folder as it was shown, for the "Все" chip.
+    pub bar_all: usize,
+    /// Folder bar history for the mouse back / forward buttons.
+    pub bar_back: Vec<PathBuf>,
+    pub bar_fwd: Vec<PathBuf>,
+    /// Sideways scroll of the folder buttons on the toolbar.
+    pub bar_scroll: f32,
+    /// Scroll the chosen folder button into view on the next frame.
+    pub bar_reveal: bool,
+    /// The pointer is over the toolbar (so the wheel scrolls it, not the grid).
+    pub over_toolbar: bool,
+    pub subdirs: Vec<SubDir>,
     pub flagged_only: bool,
     pub grid: bool,
 
@@ -236,6 +268,8 @@ pub struct App {
     /// Index the strip last scrolled to, so it follows navigation.
     pub strip_index: usize,
     pub grid_scroll_to_current: bool,
+    /// One-off scroll position for the grid, set when moving between folders.
+    pub grid_jump: Option<f32>,
     pub frame_no: u64,
 
     watcher: Option<notify::RecommendedWatcher>,
@@ -268,6 +302,16 @@ impl App {
             index: 0,
             folder: None,
             recursive: false,
+            bar_root: None,
+            bar_recursive: false,
+            bar_all: 0,
+            bar_back: Vec::new(),
+            bar_fwd: Vec::new(),
+            bar_scroll: 0.0,
+            bar_reveal: false,
+            over_toolbar: false,
+            subdirs: Vec::new(),
+            grid_jump: None,
             flagged_only: false,
             grid: true,
             thumbs: HashMap::new(),
@@ -388,6 +432,7 @@ impl App {
     pub fn resort(&mut self) {
         let keep = self.current_path();
         self.sort_items();
+        sort_subdirs(&mut self.subdirs, self.s.sort, self.s.sort_desc);
         self.rebuild_visible(keep);
     }
 
@@ -398,6 +443,7 @@ impl App {
             }
             return;
         }
+        self.bar_root = None;
         if path.is_dir() {
             self.load_folder(path.to_path_buf(), None, self.s.include_subfolders);
             self.set_grid(true);
@@ -434,6 +480,7 @@ impl App {
 
     pub fn open_folder(&mut self, dir: PathBuf, recursive: bool) {
         self.ask_subfolders = None;
+        self.bar_root = None;
         self.s.include_subfolders = recursive;
         self.load_folder(dir, None, recursive);
         self.set_grid(true);
@@ -441,9 +488,25 @@ impl App {
 
     pub fn load_folder(&mut self, dir: PathBuf, select: Option<PathBuf>, recursive: bool) {
         let mut items = Vec::new();
-        scan_dir(&dir, recursive, &mut items, 0);
+        scan_dir(&dir, recursive, &self.s.excluded_dirs, &mut items, 0);
+        let items_len = items.len();
         self.items = items;
         self.sync_flags();
+        // A subfolder of the opened folder keeps the bar of its siblings; anything else starts a new bar.
+        let in_bar = self.bar_root.as_deref().is_some_and(|r| dir.parent() == Some(r)) && self.subdirs.iter().any(|d| d.path == dir);
+        if !in_bar {
+            if self.bar_root.as_ref() != Some(&dir) {
+                self.bar_back.clear();
+                self.bar_fwd.clear();
+            }
+            self.subdirs = scan_subdirs(&dir, &self.s.excluded_dirs, self.s.sort, self.s.sort_desc);
+            if self.bar_root.as_ref() != Some(&dir) {
+                self.bar_scroll = 0.0;
+            }
+            self.bar_root = Some(dir.clone());
+            self.bar_recursive = recursive;
+            self.bar_all = items_len;
+        }
         self.folder = Some(dir.clone());
         self.recursive = recursive;
         self.flagged_only = false;
@@ -463,6 +526,8 @@ impl App {
         self.items = files.into_iter().filter_map(Item::from_path).collect();
         self.sync_flags();
         self.folder = None;
+        self.subdirs.clear();
+        self.bar_root = None;
         self.recursive = false;
         self.flagged_only = false;
         self.sort_items();
@@ -471,6 +536,73 @@ impl App {
         self.watch(None);
         self.set_grid(self.items.len() > 1);
         self.on_index_changed(0);
+    }
+
+    /// Whether the folder bar is shown above the grid.
+    pub fn folder_bar(&self) -> bool {
+        self.s.show_folder_tiles && self.folder.is_some() && !self.subdirs.is_empty() && !self.flagged_only
+    }
+
+    /// The subfolder shown now, or `None` when the whole opened folder is shown.
+    pub fn bar_current(&self) -> Option<&Path> {
+        self.folder.as_deref().filter(|f| Some(*f) != self.bar_root.as_deref())
+    }
+
+    /// Switches the grid to a chip of the folder bar (`None` = the whole opened folder),
+    /// remembering the step for the mouse back / forward buttons.
+    pub fn bar_go(&mut self, dir: Option<PathBuf>) {
+        let target = dir.clone().or_else(|| self.bar_root.clone());
+        if target.is_none() || target == self.folder {
+            return;
+        }
+        if let Some(cur) = self.folder.clone() {
+            self.bar_back.push(cur);
+        }
+        self.bar_fwd.clear();
+        self.bar_show(dir);
+    }
+
+    /// Mouse back (-1) / forward (+1) through the folders opened from the bar.
+    pub fn bar_history(&mut self, dir: i32) {
+        let (from, to) = if dir < 0 { (&mut self.bar_back, &mut self.bar_fwd) } else { (&mut self.bar_fwd, &mut self.bar_back) };
+        let Some(target) = from.pop() else { return };
+        if let Some(cur) = self.folder.clone() {
+            to.push(cur);
+        }
+        let root = self.bar_root.clone();
+        self.bar_show(if Some(&target) == root.as_ref() { None } else { Some(target) });
+    }
+
+    fn bar_show(&mut self, dir: Option<PathBuf>) {
+        let Some(root) = self.bar_root.clone() else { return };
+        let from = self.folder.clone();
+        self.selected.clear();
+        self.bar_reveal = true;
+        match dir {
+            Some(d) => {
+                self.load_folder(d, None, false);
+                self.set_grid(true);
+                self.grid_scroll_to_current = false;
+                self.grid_jump = Some(0.0);
+            }
+            None => {
+                self.load_folder(root, None, self.bar_recursive);
+                self.set_grid(true);
+                // Coming back from a subfolder lands on its first file when it is part of the whole view.
+                let first = from.and_then(|f| self.visible.iter().position(|&i| self.items[i].path.parent() == Some(f.as_path())));
+                match first {
+                    Some(i) => {
+                        self.index = i;
+                        self.on_index_changed(0);
+                        self.grid_scroll_to_current = true;
+                    }
+                    None => {
+                        self.grid_scroll_to_current = false;
+                        self.grid_jump = Some(0.0);
+                    }
+                }
+            }
+        }
     }
 
     fn reset_caches(&mut self) {
@@ -544,9 +676,15 @@ impl App {
         let mut added = Vec::new();
         let mut removed = Vec::new();
         let mut changed = Vec::new();
+        let mut dirs_changed = false;
         while let Ok(res) = self.fs_rx.try_recv() {
             let Ok(ev) = res else { continue };
             for p in ev.paths {
+                if self.bar_root.as_deref().is_some_and(|f| p.parent() == Some(f))
+                    && (p.is_dir() || self.subdirs.iter().any(|d| d.path == p))
+                {
+                    dirs_changed = true;
+                }
                 if formats::kind_of(&p).is_none() {
                     continue;
                 }
@@ -559,6 +697,11 @@ impl App {
                     EventKind::Modify(_) => changed.push(p),
                     _ => {}
                 }
+            }
+        }
+        if dirs_changed {
+            if let Some(dir) = self.bar_root.clone() {
+                self.subdirs = scan_subdirs(&dir, &self.s.excluded_dirs, self.s.sort, self.s.sort_desc);
             }
         }
         if added.is_empty() && removed.is_empty() && changed.is_empty() {
@@ -574,6 +717,9 @@ impl App {
             }
         }
         for p in added {
+            if self.is_excluded(&p) {
+                continue;
+            }
             if self.items.iter().any(|i| i.path == p) {
                 changed.push(p);
                 continue;
@@ -601,6 +747,66 @@ impl App {
         if jump.is_some() || keep.as_ref().is_some_and(|k| removed.contains(k)) {
             self.on_index_changed(1);
         }
+    }
+
+    /// Whether `p` lies in a subfolder the user excluded from the open folder.
+    fn is_excluded(&self, p: &Path) -> bool {
+        let Some(root) = self.folder.as_deref().filter(|_| self.recursive) else { return false };
+        p.ancestors().skip(1).take_while(|a| *a != root).any(|a| self.s.excluded_dirs.iter().any(|x| x == a))
+    }
+
+    /// Excluded subfolders of the folder open now (with subfolders).
+    pub fn excluded_here(&self) -> usize {
+        match self.folder.as_deref().filter(|_| self.recursive) {
+            Some(root) => self.s.excluded_dirs.iter().filter(|d| d.starts_with(root) && d.as_path() != root).count(),
+            None => 0,
+        }
+    }
+
+    /// Folders of the current file or of the selection that can be excluded (not the open folder itself).
+    pub fn exclude_candidates(&self) -> Vec<PathBuf> {
+        let Some(root) = self.folder.as_deref().filter(|_| self.recursive) else { return Vec::new() };
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        for p in self.targets() {
+            if let Some(d) = p.parent().filter(|d| *d != root && d.starts_with(root)) {
+                if !dirs.iter().any(|x| x == d) {
+                    dirs.push(d.to_path_buf());
+                }
+            }
+        }
+        dirs
+    }
+
+    fn exclude_folders(&mut self) {
+        let dirs = self.exclude_candidates();
+        if dirs.is_empty() {
+            self.toast("Файл лежит в самой открытой папке, исключать нечего");
+            return;
+        }
+        let gone_dir = |p: &Path| dirs.iter().any(|d| p.starts_with(d));
+        // Stay on the current file, or land on the nearest one that remains.
+        let next = (self.index..self.count())
+            .chain((0..self.index).rev())
+            .map(|v| &self.items[self.visible[v]].path)
+            .find(|p| !gone_dir(p))
+            .cloned();
+        let before = self.items.len();
+        self.items.retain(|i| !dirs.iter().any(|d| i.path.starts_with(d)));
+        self.selected.retain(|p| !dirs.iter().any(|d| p.starts_with(d)));
+        let gone = before - self.items.len();
+        for d in &dirs {
+            if !self.s.excluded_dirs.contains(d) {
+                self.s.excluded_dirs.push(d.clone());
+            }
+        }
+        self.s.save();
+        self.rebuild_visible(next);
+        self.on_index_changed(0);
+        let what = match dirs.as_slice() {
+            [one] => format!("Папка «{}» исключена", one.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
+            many => format!("Исключено папок: {}", many.len()),
+        };
+        self.toast(format!("{what}, убрано файлов: {gone}. Вернуть можно в меню"));
     }
 
     pub fn invalidate(&mut self, p: &Path) {
@@ -1028,6 +1234,20 @@ impl App {
             }
             Action::OpenPath(p) => self.open_path(&p),
             Action::RemoveQuick(p) => self.s.quick_access.retain(|x| x != &p),
+            Action::ExcludeFolder => self.exclude_folders(),
+            Action::EnterFolder(dir) => self.bar_go(Some(dir)),
+            Action::FolderAll => self.bar_go(None),
+            Action::ToggleFolderTiles => self.s.show_folder_tiles = !self.s.show_folder_tiles,
+            Action::RestoreExcluded => {
+                if let Some(root) = self.folder.clone() {
+                    let n = self.excluded_here();
+                    self.s.excluded_dirs.retain(|d| !(d.starts_with(&root) && *d != root));
+                    self.s.save();
+                    let cur = self.current_path();
+                    self.load_folder(root, cur, self.recursive);
+                    self.toast(format!("Возвращено папок: {n}"));
+                }
+            }
             Action::OpenFolder => {
                 if let Some(dir) = rfd::FileDialog::new().set_title("Открыть папку").pick_folder() {
                     let has_subdirs = std::fs::read_dir(&dir).is_ok_and(|rd| {
@@ -1224,7 +1444,10 @@ impl App {
         }
         let title = match self.current() {
             Some(it) => format!("{} — Angle View", it.name),
-            None => "Angle View".to_string(),
+            None => match self.folder.as_deref().and_then(|f| f.file_name()) {
+                Some(n) => format!("{} — Angle View", n.to_string_lossy()),
+                None => "Angle View".to_string(),
+            },
         };
         if title != self.title {
             self.ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
@@ -1252,14 +1475,14 @@ impl App {
     }
 }
 
-fn scan_dir(dir: &Path, recursive: bool, out: &mut Vec<Item>, depth: u32) {
+fn scan_dir(dir: &Path, recursive: bool, skip: &[PathBuf], out: &mut Vec<Item>, depth: u32) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for e in rd.flatten() {
         let Ok(ft) = e.file_type() else { continue };
         let path = e.path();
         if ft.is_dir() {
-            if recursive && depth < 32 {
-                scan_dir(&path, true, out, depth + 1);
+            if recursive && depth < 32 && !skip.contains(&path) {
+                scan_dir(&path, true, skip, out, depth + 1);
             }
         } else if let Some(kind) = formats::kind_of(&path) {
             let md = e.metadata().ok();
@@ -1273,6 +1496,64 @@ fn scan_dir(dir: &Path, recursive: bool, out: &mut Vec<Item>, depth: u32) {
             });
         }
     }
+}
+
+/// Hidden and system folders (".git", "$RECYCLE.BIN", …) are not offered as tiles.
+fn is_hidden_dir(e: &std::fs::DirEntry) -> bool {
+    if e.file_name().to_string_lossy().starts_with(['.', '$']) {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if e.metadata().is_ok_and(|m| m.file_attributes() & 0x6 != 0) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Lists the direct subfolders of `dir` with the number of images and videos in each.
+fn scan_subdirs(dir: &Path, skip: &[PathBuf], sort: SortKey, desc: bool) -> Vec<SubDir> {
+    let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut out: Vec<SubDir> = Vec::new();
+    for e in rd.flatten() {
+        if !e.file_type().is_ok_and(|t| t.is_dir()) || is_hidden_dir(&e) {
+            continue;
+        }
+        let path = e.path();
+        if skip.contains(&path) {
+            continue;
+        }
+        let files = std::fs::read_dir(&path)
+            .map(|inner| {
+                inner
+                    .flatten()
+                    .filter(|f| f.file_type().is_ok_and(|t| !t.is_dir()) && formats::kind_of(&f.path()).is_some())
+                    .count()
+            })
+            .unwrap_or(0);
+        // Folders with nothing to show are left out of the bar.
+        if files == 0 {
+            continue;
+        }
+        let modified = e.metadata().and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
+        let name = e.file_name().to_string_lossy().into_owned();
+        out.push(SubDir { path, name, files, modified });
+    }
+    sort_subdirs(&mut out, sort, desc);
+    out
+}
+
+fn sort_subdirs(dirs: &mut [SubDir], sort: SortKey, desc: bool) {
+    dirs.sort_by(|a, b| {
+        let o = match sort {
+            SortKey::Modified => a.modified.cmp(&b.modified),
+            SortKey::Size => a.files.cmp(&b.files),
+            _ => natural_cmp(&a.name, &b.name),
+        };
+        if desc && sort != SortKey::Random { o.reverse() } else { o }
+    });
 }
 
 fn unique_path(p: &Path) -> PathBuf {

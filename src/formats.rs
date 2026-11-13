@@ -2,7 +2,7 @@ use std::path::Path;
 
 /// Formats decoded by the built-in pure-Rust decoders.
 pub const IMAGE_EXT: &[&str] = &[
-    "jpg", "jpeg", "jpe", "jfif", "png", "apng", "gif", "webp", "bmp", "dib", "tif", "tiff", "ico",
+    "jpg", "jpeg", "jpe", "jfif", "jif", "png", "apng", "gif", "webp", "bmp", "dib", "tif", "tiff", "ico",
     "jxl", "svg", "svgz", "tga", "qoi",
 ];
 

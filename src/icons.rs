@@ -25,6 +25,7 @@ pub enum Icon {
     Fullscreen,
     ExitFullscreen,
     ChevronUp,
+    ChevronDown,
     ChevronLeft,
     ChevronRight,
     Info,
@@ -185,6 +186,7 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             line(&[(10.0, 14.0), (4.0, 20.0)]);
         }
         Icon::ChevronUp => line(&[(6.0, 15.0), (12.0, 9.0), (18.0, 15.0)]),
+        Icon::ChevronDown => line(&[(6.0, 9.0), (12.0, 15.0), (18.0, 9.0)]),
         Icon::ChevronLeft => line(&[(15.0, 6.0), (9.0, 12.0), (15.0, 18.0)]),
         Icon::ChevronRight => line(&[(9.0, 6.0), (15.0, 12.0), (9.0, 18.0)]),
         Icon::Info => {

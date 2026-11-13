@@ -225,7 +225,7 @@ fn read_maybe_gz(path: &Path) -> Result<Vec<u8>, String> {
 /// Fast thumbnail: JPEGs use DCT-domain downscaling, everything else a full decode.
 pub fn decode_thumb(path: &Path, size: u32) -> Result<ColorImage, String> {
     let ext = formats::ext_of(path);
-    let img = if matches!(ext.as_str(), "jpg" | "jpeg" | "jpe" | "jfif") {
+    let img = if matches!(ext.as_str(), "jpg" | "jpeg" | "jpe" | "jfif" | "jif") {
         match jpeg_thumb(path, size) {
             Some(img) => img,
             None => open_dynamic(path)?,
